@@ -154,6 +154,11 @@ GO_BUILTIN_STRUCTS = [
     # as different types of go_type, however the decision
     # was made to represent them as a separate struct that
     # follows a go_type instead
+    ('go_type_metadata_chan', [
+        ('elem', PTRSIZE, FF_PTR|FF_DATA|offflag(), OFF_CURRENT_SEGMENT,
+            None, None),
+        ('dir', PTRSIZE, FF_PTR|FF_DATA, None, None, None)
+        ]),
     ('go_type_metadata_map', [
         ('key', PTRSIZE, FF_PTR|FF_DATA|offflag(), OFF_CURRENT_SEGMENT,
             None, None),
@@ -176,8 +181,8 @@ GO_BUILTIN_STRUCTS = [
             None, None)
         ]),
     ('go_type_metadata_func', [
-        ('inCount', 4, FF_DWORD|FF_DATA, None, None, None),
-        ('outCount', 4, FF_DWORD|FF_DATA, None, None, None)
+        ('inCount', 2, FF_WORD|FF_DATA, None, None, None),
+        ('outCount', 2, FF_WORD|FF_DATA, None, None, None)
         ]),
     ('go_type_metadata_array', [
         ('elem', PTRSIZE, FF_PTR|FF_DATA|offflag(), OFF_CURRENT_SEGMENT,
@@ -185,6 +190,10 @@ GO_BUILTIN_STRUCTS = [
         ('slice', PTRSIZE, FF_PTR|FF_DATA|offflag(), OFF_CURRENT_SEGMENT,
             None, None),
         ('len', PTRSIZE, FF_PTR|FF_DATA, None, None, None)
+        ]),
+    ('go_type_metadata_slice', [
+        ('elem', PTRSIZE, FF_PTR|FF_DATA|offflag(), OFF_CURRENT_SEGMENT,
+            None, None)
         ]),
     # go_type_structfield is pointed to by go_type_metadata_struct
     # as `fields`
@@ -287,7 +296,7 @@ def create_and_populate_struct(struct_name, struct_fields,
     :param member_comments: list of comments for each member.
                             length must be equal to struct_fields
     :param member_tinfos: list of tinfo_t descriptors for each member.
-                          length must be euqal to struct_fields
+                          length must be equal to struct_fields
     :return: struct_t of the newly created struct
     """
     if member_comments:
@@ -616,6 +625,8 @@ def map_type_structs():
                 if typekind == TYPEKIND_VALS['kindStruct'][0]:
                     create_go_struct(type_ea)
                     structs_created += 1
+                elif typekind == TYPEKIND_VALS['kindInterface'][0]:
+                    LOG.info('go_interface found at 0x%x', type_ea)
 
 
     runtime_newobject_fn = get_name_ea(BADADDR, 'runtime_newobject')
@@ -707,6 +718,10 @@ def map_type_structs():
                     if typekind == TYPEKIND_VALS['kindStruct'][0]:
                         create_go_struct(go_type_addr)
                         structs_created += 1
+                    elif typekind == TYPEKIND_VALS['kindInterface'][0]:
+                        LOG.info('go_interface found at 0x%x',
+                                 go_type_addr)
+                        declare_interface(go_type_addr)
 
     return types_parsed, structs_created
 
@@ -783,6 +798,8 @@ def declare_and_parse_go_type(ea):
             ida_struct.get_struc_id(type_struct_name))
     type_struct_size = ida_struct.get_struc_size(type_struct)
 
+    tflag = get_struct_val(ea, 'go_type0.tflag')
+
     if not ida_bytes.del_items(ea, 0, type_struct_size):
         LOG.error('could not undefine bytes for go_type ' \
                   'at 0x%x', ea)
@@ -808,9 +825,16 @@ def declare_and_parse_go_type(ea):
     elif type_kind == TYPEKIND_VALS['kindPtr'][0]:
         type_kind_name = 'go_type_metadata_ptr'
     elif type_kind == TYPEKIND_VALS['kindInterface'][0]:
+        LOG.info('interface type at 0x%x', ea)
         type_kind_name = 'go_type_metadata_iface'
     elif type_kind == TYPEKIND_VALS['kindStruct'][0]:
         type_kind_name = 'go_type_metadata_struct'
+    elif type_kind == TYPEKIND_VALS['kindArray'][0]:
+        type_kind_name = 'go_type_metadata_array'
+    elif type_kind == TYPEKIND_VALS['kindChan'][0]:
+        type_kind_name = 'go_type_metadata_chan'
+    elif type_kind == TYPEKIND_VALS['kindSlice'][0]:
+        type_kind_name = 'go_type_metadata_slice'
 
     if type_kind_name:
         LOG.debug('adding %s at 0x%x', type_kind_name, type_kind_ea)
@@ -830,6 +854,23 @@ def declare_and_parse_go_type(ea):
             LOG.error('could not declare typekind %s struct at ' \
                       '0x%x',
                       type_kind_name, type_kind_ea)
+
+    if (tflag & TYPE_TFLAGS['uncommon']) != 0:
+        uncommon_data_ea = type_kind_ea + type_kind_size
+        uncommon_struct_name = 'go_type%d_metadata_uncommon' % \
+                type_idx
+        uncommon_struct_id = ida_struct.get_struc_id(
+                                uncommon_struct_name)
+        uncommon_sptr = ida_struct.get_struc(uncommon_struct_id)
+        uncommon_struct_size = ida_struct.get_struc_size(uncommon_sptr)
+        LOG.debug('Declaring uncommon type data at 0x%x',
+                  uncommon_data_ea)
+        ida_bytes.del_items(uncommon_data_ea, uncommon_struct_size)
+        if not ida_bytes.create_struct(uncommon_data_ea,
+                                       uncommon_struct_size,
+                                       uncommon_struct_id):
+            LOG.error('Could not declare uncommon type data at 0x%x',
+                      uncommon_data_ea)
 
     return type_struct
 
@@ -858,6 +899,10 @@ def get_moduledata_name_offset(ea, name_offset):
     return types_soff
 
 
+def nameoff(name_offset, idx):
+    return GO_TYPES_RANGES[idx][0] + name_offset
+
+
 def get_raw_name_str(ea):
     """
     Get actual name string from name metadata at `ea`.
@@ -881,6 +926,106 @@ def get_type_name(ea):
     name_ea = get_moduledata_name_offset(ea,
                 get_struct_val(ea, 'go_type0.str'))
     return get_raw_name_str(name_ea)
+
+
+def resolve_moduledata_idx(ea):
+    """
+    Returns the index of which moduledata entry holds info
+    for the address at `ea`. The index lines up with the
+    prior declared go type (0 --> go_type0, 1 --> go_type1, etc.)
+
+    :param ea: effective address
+    """
+    idx = 0
+    for mod_soff, mod_eoff in GO_TYPES_RANGES:
+        if ea >= mod_soff and ea < mod_eoff:
+            return idx
+        idx += 1
+
+    raise Exception('Cannot get moduledata index for 0x%x' % ea)
+
+
+def get_ida_struc_size(struct_name):
+    """
+    Returns the size of an IDA struct of the name `struct_name`.
+    """
+    type_id = ida_struct.get_struc_id(struct_name)
+    type_sptr = ida_struct.get_struc(type_id)
+    return ida_struct.get_struc_size(type_sptr)
+
+
+def declare_interface(ea):
+    """
+    Creates and returns a structure that describes the interface
+    at `ea` (which is assumed to be a go type for an interface).
+    """
+    kind = (get_struct_val(ea, 'go_type0.kind') & 0x1f)
+    if kind != TYPEKIND_VALS['kindInterface'][0]:
+        msg = 'type at 0x%s not an interface' % ea
+        LOG.error(msg)
+        raise Exception(msg)
+
+    module_idx = resolve_moduledata_idx(ea)
+    type_size = get_ida_struc_size('go_type0')
+    tflag = (get_struct_val(ea, 'go_type0.tflag') & 0x7)
+
+    iface_name = 'anonymous'
+    if tflag & TYPE_TFLAGS['named']:
+        iface_name = normalize_name(get_type_name(ea), ea,
+                                    prepend_type_info=False)
+        if tflag & TYPE_TFLAGS['extraStar']:
+            iface_name = iface_name[1:]
+        LOG.info('declare_interface: declaring iface %s at 0x%x',
+                 iface_name, ea)
+
+    iface_ea = ea + type_size
+    iface_mhdr_ea = iface_ea + PTRSIZE
+    mhdr_ea = get_struct_val(iface_mhdr_ea, 'go_slice.array')
+    mhdr_len = get_struct_val(iface_mhdr_ea, 'go_slice.len')
+    iface_methods = []
+    for i in range(0, mhdr_len):
+        mhdr_entry_ea = mhdr_ea + (i * PTRSIZE)
+        imethod_struc_name = 'go_type%d_metadata_imethod' % module_idx
+        imethod_struc_size = get_ida_struc_size(imethod_struc_name)
+        name_offset = nameoff(
+                get_struct_val(mhdr_entry_ea,
+                               '%s.name' % imethod_struc_name),
+                module_idx)
+        imethod_name = get_raw_name_str(name_offset)
+        LOG.info('found interface method %s.%s()',
+                 iface_name, imethod_name)
+        ida_bytes.del_items(mhdr_entry_ea, imethod_struc_size)
+        ida_bytes.create_struct(mhdr_entry_ea,
+                                imethod_struc_size,
+                                ida_struct.get_struc_id(imethod_struc_name))
+        iface_methods.append((
+            normalize_name(imethod_name, None,
+                           prepend_type_info=False),
+            PTRSIZE,
+            FF_PTR|FF_DATA|offflag(),
+            OFF_CURRENT_SEGMENT, None, None
+        ))
+
+    LOG.debug('Creating new itab for %s', iface_name)
+    create_and_populate_struct('go_itab__%s' % iface_name,
+                               iface_methods)
+
+    LOG.debug('Creating new iface for %s', iface_name)
+    interface_tinfo = ida_typeinf.tinfo_t()
+    ida_typeinf.parse_decl(interface_tinfo,
+                           idaapi.cvar.idati,
+                           'go_itab__%s *;' % iface_name,
+                           ida_typeinf.PT_TYP)
+    iface_fields = [
+        ('tab', PTRSIZE, FF_PTR|FF_DATA|offflag(), OFF_CURRENT_SEGMENT,
+            None, None),
+        ('data', PTRSIZE, FF_PTR|FF_DATA|offflag(), OFF_CURRENT_SEGMENT,
+            None, None)
+        ]
+    iface_tinfos = [interface_tinfo, None]
+    create_and_populate_struct('go_iface__%s' % iface_name,
+                               iface_fields, None,
+                               iface_tinfos)
 
 
 def create_structfields(ea, num_fields):
@@ -1044,7 +1189,7 @@ def create_structfields(ea, num_fields):
                                    ida_typeinf.PT_TYP)
             field_tinfo = array_tinfo
         elif fieldtype_kind == TYPEKIND_VALS['kindStruct'][0]:
-            LOG.debug('creating new struct at %x for field %s',
+            LOG.debug('creating new struct at 0x%x for field %s',
                       fieldtype_ea, fieldname_raw_str)
             child_struct_mptr, child_struct_name = create_go_struct(fieldtype_ea)
             fieldtype_size = child_struct_name
@@ -1226,15 +1371,79 @@ def create_go_type_struct(idx, types_ea):
     return create_and_populate_struct(go_type_name, go_type_spec)
 
 
-def create_imethod_struct(idx, types_ea):
+def create_uncommon_struct(idx, types_ea):
     """
-    Creates a new imethod struct. Like with go_type, imethod
+    Creates a struct used to describe uncommon type metadata.
+    Like with go_type, uncommon metadata has fields with a
+    moduledata-dependent user offset.
+
+    :param idx: moduledata index (firstmoduledata starts at 0)
+    :param types_ea: effective address of moduledata typedata
+    """
+    struct_name = 'go_type%d_metadata_uncommon' % idx
+    types_opinfo = idaapi.opinfo_t()
+    types_opinfo.ri.base = types_ea
+    types_opinfo.ri.target = BADADDR
+    types_opinfo.ri.tdelta = 0
+    types_opinfo.ri.flags = ida_nalt.REF_OFF64
+    struct_spec = [
+        ('pkgPath', 4, FF_DWORD|FF_DATA|offflag(), types_opinfo, None,
+            None),
+        ('mcount', 2, FF_WORD|FF_DATA, None, None, None),
+        ('xcount', 2, FF_WORD|FF_DATA, None, None, None),
+        ('moff', 4, FF_DWORD|FF_DATA, None, None, None),
+        ('_unused', 4, FF_DWORD|FF_DATA, None, None, None)
+        ]
+    return create_and_populate_struct(struct_name, struct_spec)
+
+
+def create_method_struct(idx, types_ea, text_ea):
+    """
+    Creates a new method type struct (used to describe
+    struct-specific methods). Like with go_type, method
     structs have fields with a moduledata-dependent user offset.
 
     :param idx: moduledata index (firstmoduledata starts at 0)
-    :param types_ea: effective address of moduledata
+    :param types_ea: effective address of moduledata typedata
+    :param text_ea: effective address of moduledata text section
     """
-    imethod_name = 'go_imethod%d' % idx
+    struct_name = 'go_type%d_metadata_method' % idx
+
+    nameOff_opinfo = idaapi.opinfo_t()
+    nameOff_opinfo.ri.base = types_ea
+    nameOff_opinfo.ri.target = BADADDR
+    nameOff_opinfo.ri.tdelta = 0
+    nameOff_opinfo.ri.flags = ida_nalt.REF_OFF32
+
+    textOff_opinfo = idaapi.opinfo_t()
+    textOff_opinfo.ri.base = text_ea
+    textOff_opinfo.ri.target = BADADDR
+    textOff_opinfo.ri.tdelta = 0
+    textOff_opinfo.ri.flags = ida_nalt.REF_OFF32
+
+    go_imethod_spec = [
+        ('name', 4, FF_DWORD|FF_DATA|offflag(), nameOff_opinfo, None,
+            None),
+        ('typ', 4, FF_DWORD|FF_DATA|offflag(), nameOff_opinfo, None,
+            None),
+        ('ifn', 4, FF_DWORD|FF_DATA|offflag(), textOff_opinfo, None,
+            None),
+        ('tfn', 4, FF_DWORD|FF_DATA|offflag(), textOff_opinfo, None,
+            None)
+        ]
+    return create_and_populate_struct(struct_name, go_imethod_spec)
+
+
+def create_imethod_struct(idx, types_ea):
+    """
+    Creates a new imethod tpe struct (used to describe
+    interface-specific methods). Like with go_type, imethod
+    structs have fields with a moduledata-dependent user offset.
+
+    :param idx: moduledata index (firstmoduledata starts at 0)
+    :param types_ea: effective address of moduledata typedata
+    """
+    imethod_name = 'go_type%d_metadata_imethod' % idx
     types_opinfo = idaapi.opinfo_t()
     types_opinfo.ri.base = types_ea
     types_opinfo.ri.target = BADADDR
@@ -1263,6 +1472,7 @@ def main():
     # enumerate all moduledata structs in the noptrdata section
     # starting with runtime.firstmoduledata
     moduledata_struct_id = ida_struct.get_struc_id('go_runtime_moduledata')
+    idx = 0
     if moduledata_struct_id != BADADDR:
         moduledata_size = ida_struct.get_struc_size(
                             ida_struct.get_struc(moduledata_struct_id))
@@ -1289,17 +1499,23 @@ def main():
             etypes_offset = ida_bytes.get_qword(
                     moduledata_ea + etypes_struct_offset)
             GO_TYPES_RANGES.append( (types_offset,etypes_offset) )
-            moduledata_ea = get_next_moduledata(moduledata_ea)
 
-    # create a different type struct for each moduledata instance
-    # found in the rodata section ("go_type0", "go_type1", etc.).
-    # The name and type offsets in the go_type struct rely on that
-    # particular offset
-    for idx, (types_start_ea, _) in enumerate(GO_TYPES_RANGES):
-        LOG.info('Creating go_type struct out of offset 0x%x',
-                 types_start_ea)
-        create_go_type_struct(idx, types_start_ea)
-        create_imethod_struct(idx, types_start_ea)
+            # create a different type struct for each moduledata instance
+            # found in the rodata section ("go_type0", "go_type1", etc.).
+            # The name and type offsets in the go_type struct rely on that
+            # particular offset
+            LOG.info('Creating go_type struct out of offset 0x%x',
+                     types_offset)
+            create_go_type_struct(idx, types_offset)
+            # create first go_type struct before creating a method to
+            # have a cheese-o way to get the text section start
+            text_start_ea = get_struct_val(moduledata_ea,
+                                           'go_runtime_moduledata.text')
+            create_uncommon_struct(idx, types_offset)
+            create_imethod_struct(idx, types_offset)
+            create_method_struct(idx, types_offset, text_start_ea)
+            moduledata_ea = get_next_moduledata(moduledata_ea)
+            idx += 1
 
     LOG.info('renaming and mapping out type structs...')
     types_parsed, structs_created = map_type_structs()

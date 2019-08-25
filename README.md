@@ -16,4 +16,3 @@ runtime metadata.
 
 * x86_64 only
 * tested only on go1.11 and go1.12
-* go interface enumeration is meh
