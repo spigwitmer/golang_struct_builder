@@ -1176,7 +1176,7 @@ def create_structfields(ea, num_fields):
                     fieldtype_size = array_struct_name
                     field_type_info = None
                     break
-                elif array_elem_kind == TYPEKIND_VALS{'kindInterface'][0]:
+                elif array_elem_kind == TYPEKIND_VALS['kindInterface'][0]:
                     iface_name = declare_interface(array_elem_ea)
                     array_type_decl = iface_name + array_type_decl
                     fieldtype_size = iface_name
