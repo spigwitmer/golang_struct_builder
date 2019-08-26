@@ -586,7 +586,7 @@ def get_segment_offsets(segm_name):
     if not segm:
         if segm_name.startswith('.'):
             # Mach-O binaries...
-            segm = idaapi.get_segm_by_name('_' + segm_name[1:])
+            segm = idaapi.get_segm_by_name('__' + segm_name[1:])
         if not segm:
             raise Exception('could not find %s segment' % segm_name)
     return segm.start_ea, segm.end_ea
@@ -726,6 +726,8 @@ def map_type_structs():
     return types_parsed, structs_created
 
 
+STRUCT_REGISTRY = {}
+
 def create_go_struct(ea):
     """
     Create an IDA structure out of the given go_type
@@ -752,11 +754,16 @@ def create_go_struct(ea):
             struct_name = struct_name[1:]
         struct_name = 'go_struct__' + struct_name
 
+    if ea in STRUCT_REGISTRY:
+        LOG.debug('go struct at 0x%x already named', ea)
+        return STRUCT_REGISTRY[ea]
+
     fields_ea = type_kind_ea + fields_soff
     num_fields = get_struct_val(fields_ea, 'go_array.len')
     new_struct_mptr = None
     LOG.debug('struct %s at 0x%x has %d fields',
               struct_name, fields_ea, num_fields)
+    STRUCT_REGISTRY[ea] = (new_struct_mptr, struct_name)
     if num_fields > 0:
         fields_ptr_ea = get_struct_val(fields_ea,
                                        'go_array.data')
@@ -770,6 +777,7 @@ def create_go_struct(ea):
                 member_comments=tag_list,
                 member_tinfos=tinfo_list)
         if new_struct_mptr:
+            STRUCT_REGISTRY[ea] = (new_struct_mptr, struct_name)
             ida_struct.set_struc_cmt(
                     new_struct_mptr.id,
                     '0x%x' % ea,
@@ -1006,9 +1014,17 @@ def declare_interface(ea):
             OFF_CURRENT_SEGMENT, None, None
         ))
 
+    itab_fields = [
+        ('inter', PTRSIZE, FF_PTR|FF_DATA|offflag(),
+            OFF_CURRENT_SEGMENT, None, None),
+        ('_type', PTRSIZE, FF_PTR|FF_DATA|offflag(),
+            OFF_CURRENT_SEGMENT, None, None),
+        ('hash', 4, FF_DWORD|FF_DATA, None, None, None),
+        ('_unused', 4, FF_DWORD|FF_DATA, None, None, None)
+        ] + iface_methods
     LOG.debug('Creating new itab for %s', iface_name)
     create_and_populate_struct('go_itab__%s' % iface_name,
-                               iface_methods)
+                               itab_fields)
 
     LOG.debug('Creating new iface for %s', iface_name)
     interface_tinfo = ida_typeinf.tinfo_t()
@@ -1023,9 +1039,11 @@ def declare_interface(ea):
             None, None)
         ]
     iface_tinfos = [interface_tinfo, None]
-    create_and_populate_struct('go_iface__%s' % iface_name,
+    iface_name = 'go_iface__%s' % iface_name
+    create_and_populate_struct(iface_name,
                                iface_fields, None,
                                iface_tinfos)
+    return iface_name
 
 
 def create_structfields(ea, num_fields):
@@ -1071,7 +1089,6 @@ def create_structfields(ea, num_fields):
             TYPEKIND_VALS['kindChan'][0]: FF_INT|FF_DATA,
             TYPEKIND_VALS['kindMap'][0]: 'go_hmap',
             TYPEKIND_VALS['kindString'][0]: 'go_string',
-            TYPEKIND_VALS['kindInterface'][0]: 'go_interface',
             TYPEKIND_VALS['kindFloat32'][0]: FF_FLOAT,
             TYPEKIND_VALS['kindFloat64'][0]: FF_DOUBLE,
             TYPEKIND_VALS['kindComplex64'][0]: 'go_complex64',
@@ -1159,6 +1176,12 @@ def create_structfields(ea, num_fields):
                     fieldtype_size = array_struct_name
                     field_type_info = None
                     break
+                elif array_elem_kind == TYPEKIND_VALS{'kindInterface'][0]:
+                    iface_name = declare_interface(array_elem_ea)
+                    array_type_decl = iface_name + array_type_decl
+                    fieldtype_size = iface_name
+                    field_type_info = None
+                    break
                 elif array_elem_kind in kind_datatypes.keys():
                     field_type_info = kind_datatypes[array_elem_kind]
                     if type(field_type_info) in [str,unicode]:
@@ -1193,6 +1216,12 @@ def create_structfields(ea, num_fields):
                       fieldtype_ea, fieldname_raw_str)
             child_struct_mptr, child_struct_name = create_go_struct(fieldtype_ea)
             fieldtype_size = child_struct_name
+            field_type_info = None
+        elif fieldtype_kind == TYPEKIND_VALS['kindInterface'][0]:
+            LOG.debug('creating new interface at 0x%x for field %s',
+                      fieldtype_ea, fieldname_raw_str)
+            iface_name = declare_interface(fieldtype_ea)
+            fieldtype_size = iface_name
             field_type_info = None
         elif fieldtype_kind in kind_datatypes.keys():
             # pick a pre-selected struct or typeflags to represent the field
@@ -1518,11 +1547,15 @@ def main():
             idx += 1
 
     LOG.info('renaming and mapping out type structs...')
-    types_parsed, structs_created = map_type_structs()
-
-    # TODO: painfully miscounted
-    LOG.info('parsed %d types', types_parsed)
-    LOG.info('created %d structs', structs_created)
+    try:
+        types_parsed, structs_created = map_type_structs()
+        # TODO: painfully miscounted
+        LOG.info('parsed %d types', types_parsed)
+        LOG.info('created %d structs', structs_created)
+    except Exception as ex:
+        LOG.error('bad things happened')
+        LOG.exception(ex)
+        raise
 
 
 if __name__ == '__main__':
