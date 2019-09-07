@@ -1059,6 +1059,24 @@ def create_structfields(ea, num_fields):
     structfield_sptr = ida_struct.get_struc(structfield_id)
     structfield_size = ida_struct.get_struc_size(structfield_sptr)
 
+    kind_datatypes = {
+        TYPEKIND_VALS['kindSlice'][0]: 'go_slice',
+        TYPEKIND_VALS['kindChan'][0]: FF_INT|FF_DATA,
+        TYPEKIND_VALS['kindMap'][0]: 'go_hmap',
+        TYPEKIND_VALS['kindString'][0]: 'go_string',
+        TYPEKIND_VALS['kindFloat32'][0]: FF_FLOAT,
+        TYPEKIND_VALS['kindFloat64'][0]: FF_DOUBLE,
+        TYPEKIND_VALS['kindComplex64'][0]: 'go_complex64',
+        TYPEKIND_VALS['kindComplex128'][0]: 'go_complex128',
+        TYPEKIND_VALS['kindUnsafePointer'][0]: FF_PTR|FF_DATA|offflag()
+        }
+    fieldsize_to_typesize = {
+        1: FF_BYTE,
+        2: FF_WORD,
+        4: FF_DWORD,
+        8: FF_QWORD,
+        16: FF_OWORD
+        }
     fields = []
     tags = []
     tinfos = []
@@ -1072,7 +1090,6 @@ def create_structfields(ea, num_fields):
 
         success, fieldname_raw_str, tag, pkgpath = \
                 get_name_info(fieldname_ea)
-        tags.append(tag)
 
         fieldtype_ea = get_struct_val(fs_ea,
                                       'go_type_structfield.typ')
@@ -1082,26 +1099,14 @@ def create_structfields(ea, num_fields):
         fieldoffset >>= 1
         fieldtype_kind = (get_struct_val(fieldtype_ea, 'go_type0.kind') \
                             & 0x1f)
-        field_tinfo = None
 
-        kind_datatypes = {
-            TYPEKIND_VALS['kindSlice'][0]: 'go_slice',
-            TYPEKIND_VALS['kindChan'][0]: FF_INT|FF_DATA,
-            TYPEKIND_VALS['kindMap'][0]: 'go_hmap',
-            TYPEKIND_VALS['kindString'][0]: 'go_string',
-            TYPEKIND_VALS['kindFloat32'][0]: FF_FLOAT,
-            TYPEKIND_VALS['kindFloat64'][0]: FF_DOUBLE,
-            TYPEKIND_VALS['kindComplex64'][0]: 'go_complex64',
-            TYPEKIND_VALS['kindComplex128'][0]: 'go_complex128',
-            TYPEKIND_VALS['kindUnsafePointer'][0]: FF_PTR|FF_DATA|offflag()
-            }
-        fieldsize_to_typesize = {
-            1: FF_BYTE,
-            2: FF_WORD,
-            4: FF_DWORD,
-            8: FF_QWORD,
-            16: FF_OWORD
-            }
+        if fieldtype_size == 0:
+            LOG.info('Skipping field %s (0 length)',
+                     fieldname_raw_str)
+            continue
+
+        tags.append(tag)
+        field_tinfo = None
 
         # TODO: pointers to structs? (mind those who reference
         # themselves in a linkedlist or tree like form)
