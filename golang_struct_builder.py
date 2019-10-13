@@ -592,6 +592,17 @@ def get_segment_offsets(segm_name):
     return segm.start_ea, segm.end_ea
 
 
+def resolve_name(name):
+    """
+    returns the address of the given symbol `name`. Will search for
+    mangled variation of `name` as a fallback (seen in Mach-O binaries).
+    """
+    origret = get_name_ea(BADADDR, name)
+    if origret == BADADDR:
+        return get_name_ea(BADADDR, name.replace('.', '_', 1))
+    return origret
+
+
 def map_type_structs():
     """
     Scan and recursively declare go types, creating new names where
@@ -629,17 +640,17 @@ def map_type_structs():
                     LOG.info('go_interface found at 0x%x', type_ea)
 
 
-    runtime_newobject_fn = get_name_ea(BADADDR, 'runtime_newobject')
+    runtime_newobject_fn = resolve_name('runtime.newobject')
     if runtime_newobject_fn == BADADDR:
-        LOG.error('Could not find runtime_newobject, not moving on ' \
+        LOG.error('Could not find runtime.newobject, not moving on ' \
                   '(did you run golang_loader_assist.py beforehand?)')
         return types_parsed, structs_created
 
-    for fn_name in ['runtime_newobject', 'runtime_convT2Enoptr',
-                    'runtime_convT2Eslice', 'runtime_convT2E',
-                    'runtime_convT2E16', 'runtime_convT2E32',
-                    'runtime_convT2E64', 'runtime_convT2Estring']:
-        fn_ea = get_name_ea(BADADDR, fn_name)
+    for fn_name in ['runtime.newobject', 'runtime.convT2Enoptr',
+                    'runtime.convT2Eslice', 'runtime.convT2E',
+                    'runtime.convT2E16', 'runtime.convT2E32',
+                    'runtime.convT2E64', 'runtime.convT2Estring']:
+        fn_ea = resolve_name(fn_name)
         if fn_ea == BADADDR:
             LOG.warn('could not find function %s, skipping...',
                      fn_name)
@@ -1270,7 +1281,7 @@ def find_runtime_firstmoduledata():
     """
     Finds first moduledata instance
     """
-    return ida_name.get_name_ea(BADADDR, 'runtime.firstmoduledata')
+    return resolve_name('runtime.firstmoduledata')
 
 
 def get_next_moduledata(ea):
@@ -1303,13 +1314,18 @@ def create_name(type_ea, type_struct):
     ida_struct.retrieve_member_info(str_opinfo, str_member)
     types_base_ea = str_opinfo.ri.base
 
-
     name_ea = types_base_ea + name_offset
     success, str_value, tag_value, pkgPath_value = \
             get_name_info(name_ea)
     if get_struct_val(type_ea, 'go_type0.tflag') \
             & TYPE_TFLAGS['extraStar']:
         str_value = str_value[1:]
+
+    # HACK: don't name it anything particular if it isn't
+    # meant to be
+    if (get_struct_val(type_ea, 'go_type0.tflag') \
+            & TYPE_TFLAGS['named']) == 0:
+        str_value = 'anonymous_type_%x' % type_ea
 
     if not success:
         LOG.error('could not get name info at %x',
